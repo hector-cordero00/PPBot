@@ -2,36 +2,28 @@
 bot.py — Bot de Telegram para consultar el precio del oro (24/7 en Render, plan de pago)
 ─────────────────────────────────────────────────────────────────────────────
 Usa Flask + webhook de Telegram para responder comandos, y un scheduler
-interno (APScheduler) para mandar mensajes automáticos a horas fijas.
-
-Esto es válido porque el servicio corre en un plan de PAGO de Render, que no
-se duerme por inactividad — si estuviera en el plan gratis, el proceso se
-detendría y el scheduler interno dejaría de dispararse (por eso antes
-usábamos un cron externo). Ver nota de simplificación abajo.
+interno (APScheduler) para mandar el mensaje programado a un chat fijo.
 
 Comandos soportados:
     /start              → mensaje de bienvenida
     /precio              → precio actual (usa tu referencia si la tienes puesta)
     /precio 1250         → fija 1250 como tu referencia y muestra la comparación
     /ref                 → muestra tu referencia actual
-    /suscribir           → te agrega a la lista de mensajes automáticos programados
-    /desuscribir         → te quita de esa lista
 
 Horarios automáticos (hora de Ciudad de México):
     Lunes a viernes: 8:00, 13:00 y 18:00
     Domingo: 18:00
 
+El mensaje programado se manda siempre al mismo chat fijo (CHAT_DESTINO más
+abajo) — ya no hay /suscribir ni lista de suscriptores, porque con el estado
+en memoria y varios workers eso resultaba frágil. Si en el futuro se necesita
+mandar a más de un chat, se puede volver a agregar una lista, pero fija (por
+variable de entorno, por ejemplo) en vez de dinámica.
+
 Variables de entorno requeridas:
     TELEGRAM_BOT_TOKEN   → token que te da @BotFather
-
-NOTA — simplificación a propósito (decisión tomada con el usuario):
-    Los suscriptores y las referencias de precio se guardan en memoria
-    (diccionarios normales), NO en una base externa. Esto es más simple,
-    pero significa que un redeploy o un reinicio manual del servicio en
-    Render borra esas listas — cada quien tendría que volver a escribir
-    /suscribir y /precio <valor>. Se aceptó ese trade-off para no depender
-    de Upstash. Si más adelante se quiere que sobreviva a un redeploy, se
-    puede agregar de nuevo una base como Upstash Redis.
+    CHAT_DESTINO         → id del chat al que se manda el mensaje programado
+                            (por defecto -5154895477 si no se define)
 """
 import os
 import logging
@@ -50,10 +42,13 @@ TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 ZONA = "America/Mexico_City"
 
+# Chat al que se manda el mensaje programado. Se puede sobreescribir con la
+# variable de entorno CHAT_DESTINO en Render sin tocar código.
+CHAT_DESTINO = int(os.environ.get("CHAT_DESTINO", "-5154895477"))
+
 app = Flask(__name__)
 
-# Estado en memoria — ver nota de simplificación arriba
-suscriptores = set()
+# Referencia de precio por chat — sigue en memoria (se pierde en cada redeploy)
 referencias = {}
 
 
@@ -69,20 +64,16 @@ def enviar_mensaje(chat_id, texto):
         log.warning(f"No se pudo enviar mensaje a {chat_id}: {e}")
 
 
-def enviar_a_suscriptores():
+def enviar_programado():
     """Llamada por el scheduler interno a las horas programadas."""
-    if not suscriptores:
-        log.info("[scheduler] Sin suscriptores, no se manda nada.")
-        return
     try:
         precio = obtener_precio_oro()
     except Exception as e:
         log.exception("[scheduler] Error obteniendo precio")
         return
-    for chat_id in list(suscriptores):
-        ref = referencias.get(chat_id)
-        enviar_mensaje(chat_id, formatear_mensaje(precio, precio_ref=ref))
-    log.info(f"[scheduler] Mensaje programado enviado a {len(suscriptores)} suscriptor(es).")
+    ref = referencias.get(CHAT_DESTINO)
+    enviar_mensaje(CHAT_DESTINO, formatear_mensaje(precio, precio_ref=ref))
+    log.info(f"[scheduler] Mensaje programado enviado a {CHAT_DESTINO}.")
 
 
 @app.route("/", methods=["GET"])
@@ -108,9 +99,9 @@ def webhook():
                 "Comandos:\n"
                 "*/precio* — precio actual\n"
                 "*/precio 1250* — fija tu referencia en 1250 MXN/g y compara\n"
-                "*/ref* — muestra tu referencia actual\n"
-                "*/suscribir* — recibe mensajes automáticos (8am, 1pm, 6pm lun-vie; 6pm domingo)\n"
-                "*/desuscribir* — deja de recibirlos",
+                "*/ref* — muestra tu referencia actual\n\n"
+                "Los mensajes automáticos (8am, 1pm, 6pm lun-vie; 6pm domingo) "
+                "se mandan a un chat fijo configurado por el administrador.",
             )
         elif texto.startswith("/precio"):
             partes = texto.split(maxsplit=1)
@@ -129,17 +120,6 @@ def webhook():
                 enviar_mensaje(chat_id, f"📌 Tu referencia actual: ${ref:,.2f} MXN/g")
             else:
                 enviar_mensaje(chat_id, "No tienes referencia fijada. Usa /precio 1250")
-        elif texto.startswith("/suscribir"):
-            suscriptores.add(chat_id)
-            enviar_mensaje(
-                chat_id,
-                "✅ Quedaste suscrito. Recibirás el precio automáticamente: "
-                "8am, 1pm y 6pm de lunes a viernes, y 6pm el domingo. "
-                "Usa /desuscribir para salir.",
-            )
-        elif texto.startswith("/desuscribir"):
-            suscriptores.discard(chat_id)
-            enviar_mensaje(chat_id, "❌ Ya no recibirás mensajes automáticos.")
         else:
             enviar_mensaje(chat_id, "No entendí el comando. Usa /precio")
     except Exception as e:
@@ -151,12 +131,12 @@ def webhook():
 
 # ── Scheduler interno ─────────────────────────────────────────────────────
 scheduler = BackgroundScheduler(timezone=ZONA)
-scheduler.add_job(enviar_a_suscriptores, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_a_suscriptores, CronTrigger(day_of_week="mon-fri", hour=13, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_a_suscriptores, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_a_suscriptores, CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=ZONA))
+scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ZONA))
+scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=13, minute=0, timezone=ZONA))
+scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=ZONA))
+scheduler.add_job(enviar_programado, CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=ZONA))
 scheduler.start()
-log.info("Scheduler interno iniciado (8am/1pm/6pm lun-vie, 6pm domingo, hora CDMX).")
+log.info(f"Scheduler interno iniciado. Mensajes programados van al chat {CHAT_DESTINO}.")
 
 
 if __name__ == "__main__":

@@ -17,8 +17,11 @@ import json
 import logging
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
+
+ZONA_CDMX = ZoneInfo("America/Mexico_City")
 
 GRAMOS_POR_OZ = 31.1035  # 1 oz troy exacta
 
@@ -180,7 +183,7 @@ def obtener_precio_oro() -> dict:
         "tipo_cambio": round(tc, 4),
         "fuente":      fuente,
         "tc_fuente":   tc_fuente,
-        "timestamp":   datetime.now(),
+        "timestamp":   datetime.now(ZONA_CDMX),
     }
 
 
