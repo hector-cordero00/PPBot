@@ -66,12 +66,14 @@ def enviar_mensaje(chat_id, texto):
 
 def enviar_programado():
     """Llamada por el scheduler interno a las horas programadas."""
+    log.info(f"[scheduler] Estado actual de referencias en memoria: {referencias} (pid={os.getpid()})")
     try:
         precio = obtener_precio_oro()
     except Exception as e:
         log.exception("[scheduler] Error obteniendo precio")
         return
     ref = referencias.get(CHAT_DESTINO)
+    log.info(f"[scheduler] Referencia encontrada para {CHAT_DESTINO}: {ref}")
     enviar_mensaje(CHAT_DESTINO, formatear_mensaje(precio, precio_ref=ref))
     log.info(f"[scheduler] Mensaje programado enviado a {CHAT_DESTINO}.")
 
@@ -108,6 +110,7 @@ def webhook():
             if len(partes) > 1:
                 try:
                     referencias[chat_id] = float(partes[1].replace(",", ""))
+                    log.info(f"[/precio] Referencia guardada para {chat_id}: {referencias} (pid={os.getpid()})")
                 except ValueError:
                     enviar_mensaje(chat_id, "⚠️ Usa: /precio 1250")
                     return jsonify(ok=True)
