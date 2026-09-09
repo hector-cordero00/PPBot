@@ -133,15 +133,33 @@ def webhook():
 
 
 # ── Scheduler interno ─────────────────────────────────────────────────────
+# IMPORTANTE: NO se arranca aquí (a nivel de módulo). Gunicorn importa este
+# archivo una vez en el proceso MASTER antes de hacer fork del/los worker(s).
+# Si el scheduler arrancara aquí, el hilo en segundo plano quedaría viviendo
+# en el master, en una copia de memoria totalmente separada de la que usa
+# Flask para atender /precio (que corre en el worker) — exactamente el bug
+# que causaba que el job programado nunca viera las referencias guardadas.
+#
+# En vez de eso, se arranca explícitamente en el hook post_fork de gunicorn
+# (ver gunicorn.conf.py), que se ejecuta DESPUÉS del fork, ya dentro del
+# proceso worker — el mismo que atiende las peticiones de Flask.
 scheduler = BackgroundScheduler(timezone=ZONA)
-scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=13, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=ZONA))
-scheduler.add_job(enviar_programado, CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=ZONA))
-scheduler.start()
-log.info(f"Scheduler interno iniciado. Mensajes programados van al chat {CHAT_DESTINO}.")
+
+
+def iniciar_scheduler():
+    if scheduler.running:
+        log.info("Scheduler ya estaba corriendo, no se vuelve a iniciar.")
+        return
+    scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=ZONA))
+    scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=13, minute=0, timezone=ZONA))
+    scheduler.add_job(enviar_programado, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=ZONA))
+    scheduler.add_job(enviar_programado, CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=ZONA))
+    scheduler.start()
+    log.info(f"Scheduler interno iniciado (pid={os.getpid()}). Mensajes programados van al chat {CHAT_DESTINO}.")
 
 
 if __name__ == "__main__":
-    # Solo para pruebas locales (Render usa gunicorn, ver Procfile)
+    # Ejecutando bot.py directo (pruebas locales, sin gunicorn) — no hay
+    # fork ni post_fork, así que se arranca aquí mismo antes de app.run().
+    iniciar_scheduler()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
