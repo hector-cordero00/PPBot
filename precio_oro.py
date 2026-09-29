@@ -4,9 +4,10 @@ precio_oro.py — Módulo refinado para obtener el precio del oro
 Precio del oro — cascada de 2 fuentes:
   1. Kitco /price/precious-metals  (JSON embebido __NEXT_DATA__ — muy preciso)
   2. gold-api.com                  (JSON público, sin API key)
-Tipo de cambio USD→MXN — cascada de 2 fuentes en tiempo real:
-  1. Frankfurter    (API del BCE — sin API key, actualiza varias veces/día)
-  2. exchangerate-api (fallback — actualización diaria)
+Tipo de cambio USD→MXN — cascada de 3 fuentes, de más a menos frecuente:
+  1. Google Finance (scraping — el mercado de divisas cotiza continuamente)
+  2. Frankfurter    (API del BCE — sin API key, publica una vez al día)
+  3. exchangerate-api (último fallback — actualización diaria)
 Uso:
     from precio_oro import obtener_precio_oro, formatear_mensaje
     precio = obtener_precio_oro()
@@ -99,10 +100,50 @@ def _gold_api_precio() -> float:
 
 
 # ── TIPO DE CAMBIO USD → MXN ──────────────────────────────────────────────────
+def _tc_google_finance() -> float:
+    """
+    Scrapea https://www.google.com/finance/quote/USD-MXN
+
+    A diferencia de Frankfurter/ExchangeRate-API (que publican un tipo de
+    cambio de referencia una vez al día), el mercado de divisas cotiza
+    continuamente entre semana (24/5), y Google Finance refleja eso — es la
+    fuente más "oportuna" de las disponibles sin necesitar una API key.
+
+    El precio viene en un <div class="YMlKec fxKbKc">17.6840</div>. Google
+    cambia estas clases de tanto en tanto, así que además de la clase exacta
+    buscamos el patrón "YMlKec" como ancla (más flexible a variaciones) y,
+    si ni eso aparece, un número en rango razonable justo después de
+    "USD / MXN" en el HTML, como último recurso.
+    """
+    url = "https://www.google.com/finance/quote/USD-MXN"
+    resp = requests.get(url, headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    html = resp.text
+
+    match = re.search(r'YMlKec[^>]*>([\d,]+\.\d+)<', html)
+    if match:
+        tc = float(match.group(1).replace(",", ""))
+        if 10 < tc < 40:
+            log.info(f"[Google Finance] Tipo de cambio: ${tc:.4f} MXN/USD")
+            return tc
+
+    pos = html.find("USD / MXN")
+    if pos != -1:
+        fragmento = html[pos: pos + 3000]
+        numeros = re.findall(r'>([\d]{1,3}\.\d{2,4})<', fragmento)
+        for n in numeros:
+            val = float(n)
+            if 10 < val < 40:
+                log.info(f"[Google Finance fallback] Tipo de cambio: ${val:.4f} MXN/USD")
+                return val
+
+    raise ValueError("No se encontró el tipo de cambio en Google Finance.")
+
+
 def _tc_frankfurter() -> float:
     """
-    Frankfurter API — datos del BCE y otros bancos centrales.
-    Sin API key. Actualiza varias veces al día en días hábiles.
+    Frankfurter API — tipo de referencia del BCE, publicado una vez al día
+    en días hábiles (a pesar del nombre "rate", no es continuo).
     """
     resp = requests.get(
         "https://api.frankfurter.dev/v2/rate/USD/MXN", timeout=10
@@ -116,7 +157,7 @@ def _tc_frankfurter() -> float:
 
 
 def _tc_exchangerate_api() -> float:
-    """Fallback — actualización diaria, siempre disponible."""
+    """Último fallback — actualización diaria, siempre disponible."""
     resp = requests.get(
         "https://api.exchangerate-api.com/v4/latest/USD", timeout=10
     )
@@ -128,11 +169,12 @@ def _tc_exchangerate_api() -> float:
 
 def _tipo_cambio_mxn() -> tuple[float, str]:
     """
-    Intenta las fuentes en orden de precisión.
+    Intenta las fuentes en orden de qué tan seguido se actualizan.
     Devuelve (tipo_cambio, nombre_fuente).
     """
     fuentes = [
-        ("Frankfurter/BCE",             _tc_frankfurter),
+        ("Google Finance",              _tc_google_finance),
+        ("Frankfurter/BCE (diario)",    _tc_frankfurter),
         ("ExchangeRate-API (diario)",   _tc_exchangerate_api),
     ]
     for nombre, fn in fuentes:
