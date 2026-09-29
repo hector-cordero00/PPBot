@@ -109,28 +109,36 @@ def _tc_google_finance() -> float:
     continuamente entre semana (24/5), y Google Finance refleja eso — es la
     fuente más "oportuna" de las disponibles sin necesitar una API key.
 
-    El precio viene en un <div class="YMlKec fxKbKc">17.6840</div>. Google
-    cambia estas clases de tanto en tanto, así que además de la clase exacta
-    buscamos el patrón "YMlKec" como ancla (más flexible a variaciones) y,
-    si ni eso aparece, un número en rango razonable justo después de
-    "USD / MXN" en el HTML, como último recurso.
+    La página no pinta el precio en HTML estático (no hay un <div> simple
+    con la clase de siempre) — Google la inyecta vía varios bloques
+    <script>AF_initDataCallback({key: 'ds:2', ..., data: [...ver abajo...]})</script>
+    con los datos crudos de la cotización. Dentro de esos bloques aparece
+    un array con la forma:
+        ["/g/xxxx", null, "USD / MXN", 3, null,
+         [dayHigh, cambio, cambioPct, 4, 4, 2], null, PRECIO, null, ...]
+    Extraemos ese PRECIO (el número justo después del segundo "null" que
+    sigue al arreglo de 6 números). Si Google cambia esta estructura, cae al
+    plan B: buscar un número en rango razonable cerca del texto "USD / MXN".
     """
     url = "https://www.google.com/finance/quote/USD-MXN"
     resp = requests.get(url, headers=HEADERS, timeout=10)
     resp.raise_for_status()
     html = resp.text
 
-    match = re.search(r'YMlKec[^>]*>([\d,]+\.\d+)<', html)
+    match = re.search(
+        r'"USD / MXN"\s*,\s*\d+\s*,\s*null\s*,\s*\[[^\]]*\]\s*,\s*null\s*,\s*([\d.]+)',
+        html,
+    )
     if match:
-        tc = float(match.group(1).replace(",", ""))
+        tc = float(match.group(1))
         if 10 < tc < 40:
             log.info(f"[Google Finance] Tipo de cambio: ${tc:.4f} MXN/USD")
             return tc
 
     pos = html.find("USD / MXN")
     if pos != -1:
-        fragmento = html[pos: pos + 3000]
-        numeros = re.findall(r'>([\d]{1,3}\.\d{2,4})<', fragmento)
+        fragmento = html[pos: pos + 500]
+        numeros = re.findall(r'([\d]{1,3}\.\d{3,7})', fragmento)
         for n in numeros:
             val = float(n)
             if 10 < val < 40:
