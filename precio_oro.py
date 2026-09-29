@@ -115,10 +115,13 @@ def _tc_google_finance() -> float:
     con los datos crudos de la cotización. Dentro de esos bloques aparece
     un array con la forma:
         ["/g/xxxx", null, "USD / MXN", 3, null,
-         [dayHigh, cambio, cambioPct, 4, 4, 2], null, PRECIO, null, ...]
-    Extraemos ese PRECIO (el número justo después del segundo "null" que
-    sigue al arreglo de 6 números). Si Google cambia esta estructura, cae al
-    plan B: buscar un número en rango razonable cerca del texto "USD / MXN".
+         [PRECIO_ACTUAL, cambio, cambio_%, 4, 4, 2], null, precio_cierre_anterior, ...]
+    Extraemos PRECIO_ACTUAL (el primer número del arreglo de 6). Ojo: el
+    número que viene DESPUÉS de ese arreglo (tras el segundo "null") es el
+    cierre anterior, no el precio actual — verificado con
+    precio_cierre_anterior + cambio == PRECIO_ACTUAL. Si Google cambia esta
+    estructura, cae al plan B: buscar un número en rango razonable cerca del
+    texto "USD / MXN".
     """
     url = "https://www.google.com/finance/quote/USD-MXN"
     resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -126,7 +129,7 @@ def _tc_google_finance() -> float:
     html = resp.text
 
     match = re.search(
-        r'"USD / MXN"\s*,\s*\d+\s*,\s*null\s*,\s*\[[^\]]*\]\s*,\s*null\s*,\s*([\d.]+)',
+        r'"USD / MXN"\s*,\s*\d+\s*,\s*null\s*,\s*\[\s*([\d.]+)',
         html,
     )
     if match:
